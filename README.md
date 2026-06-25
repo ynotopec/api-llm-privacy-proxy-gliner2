@@ -5,10 +5,9 @@ Minimal OpenAI-compatible privacy proxy using `fastino/gliner2-privacy-filter-PI
 ## Start
 
 ```bash
-./install.sh
 cp .env.example .env
 # edit .env: set UPSTREAM_API_KEY and PROXY_API_TOKEN
-source ./run.sh 0.0.0.0 8000
+./run.sh 0.0.0.0 8000
 ```
 
 Use the most common OpenAI-compatible base URL shape:
@@ -32,13 +31,13 @@ PROXY_API_TOKEN=your-proxy-token
 
 ## Install layout
 
-`install.sh` is idempotent and upgrade-compatible. It uses `uv` and installs into:
+`run.sh` auto-runs the idempotent, upgrade-compatible `install.sh` when the virtualenv is missing. `install.sh` uses `uv` and installs into:
 
 ```text
 ~/venv/api-llm-privacy-proxy-gliner2
 ```
 
-Run again to upgrade dependencies/code in the same virtualenv.
+Run `./install.sh` again to upgrade dependencies/code in the same virtualenv. Set `AUTO_INSTALL=0` if `run.sh` should fail instead of installing automatically.
 
 ## systemd example
 
