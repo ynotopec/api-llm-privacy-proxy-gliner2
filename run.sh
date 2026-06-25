@@ -21,7 +21,7 @@ if [ -f "$PROJECT_DIR/.env" ]; then
   set +a
 fi
 
-if [ ! -x "$VENV_DIR/bin/activate" ]; then
+if [ ! -x "$VENV_DIR/bin/python" ] || [ ! -r "$VENV_DIR/bin/activate" ]; then
   if [ "$AUTO_INSTALL" = "1" ]; then
     echo "Missing venv: $VENV_DIR. Running install.sh first..." >&2
     VENV_DIR="$VENV_DIR" "$PROJECT_DIR/install.sh"
