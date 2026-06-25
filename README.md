@@ -10,20 +10,20 @@ cp .env.example .env
 ./run.sh 0.0.0.0 8000
 ```
 
-Use the most common OpenAI-compatible base URL shape:
+Use the most common OpenAI-compatible client base URL shape:
 
 ```text
 http://127.0.0.1:8000/v1
 ```
 
-Send the proxy token to this service as the client `Authorization: Bearer ...` token. The proxy replaces it with `UPSTREAM_API_KEY` when forwarding upstream.
+The proxy accepts `/v1/...` routes and forwards them to the upstream base URL without duplicating `/v1`. Send the proxy token to this service as the client `Authorization: Bearer ...` token. The proxy replaces it with `UPSTREAM_API_KEY` when forwarding upstream.
 
 ## Important variables
 
 ```bash
 UPSTREAM_API_KEY=sk-...
 PROXY_API_TOKEN=your-proxy-token
-#UPSTREAM_BASE_URL=https://api.openai.com
+#UPSTREAM_BASE_URL=https://api.openai.com/v1
 #GLINER2_MODEL=fastino/gliner2-privacy-filter-PII-multi
 #PII_THRESHOLD=0.5
 #CUDA_VISIBLE_DEVICES=0
