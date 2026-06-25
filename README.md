@@ -25,6 +25,7 @@ INBOUND_API_KEYS='change-me'
 UPSTREAM_BASE_URL='http://127.0.0.1:8000/v1'
 UPSTREAM_API_KEY=''
 PRIVACY_MODEL_ID='fastino/gliner2-privacy-filter-PII-multi'
+PRIVACY_ENTITY_TYPES='person,full_name,first_name,last_name,date_of_birth,email,phone_number,address,street_address,city,state_or_region,postal_code,country,government_id,national_id_number,passport_number,drivers_license_number,tax_id,bank_account,account_number,iban,payment_card,card_number,username,ip_address,password,api_key,access_token,secret'
 DEVICE=auto
 TORCH_DTYPE=auto
 FILTER_OUTPUT=true

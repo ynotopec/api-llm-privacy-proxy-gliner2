@@ -49,6 +49,16 @@ class Settings:
     upstream_base_url: str = os.getenv("UPSTREAM_BASE_URL", "http://127.0.0.1:8000/v1").rstrip("/")
     upstream_api_key: str = os.getenv("UPSTREAM_API_KEY", "")
     privacy_model_id: str = os.getenv("PRIVACY_MODEL_ID", "fastino/gliner2-privacy-filter-PII-multi")
+    entity_types: list[str] = field(
+        default_factory=lambda: [
+            x.strip()
+            for x in os.getenv(
+                "PRIVACY_ENTITY_TYPES",
+                "person,full_name,first_name,last_name,date_of_birth,email,phone_number,address,street_address,city,state_or_region,postal_code,country,government_id,national_id_number,passport_number,drivers_license_number,tax_id,bank_account,account_number,iban,payment_card,card_number,username,ip_address,password,api_key,access_token,secret",
+            ).split(",")
+            if x.strip()
+        ]
+    )
     device: str = os.getenv("DEVICE", "auto")
     torch_dtype: str = os.getenv("TORCH_DTYPE", "auto")
     filter_output: bool = os.getenv("FILTER_OUTPUT", "true").lower() in {"1", "true", "yes", "on"}
@@ -250,12 +260,13 @@ class PrivacySanitizer:
         try:
             result = self.model.extract_entities(
                 text,
+                settings.entity_types,
                 threshold=settings.min_entity_score,
                 include_confidence=True,
                 include_spans=True,
             )
         except TypeError:
-            result = self.model.extract_entities(text)
+            result = self.model.extract_entities(text, settings.entity_types)
         except Exception as exc:
             log.exception("Privacy model inference failed")
             raise HTTPException(status_code=500, detail=f"privacy_filter_failed: {exc}") from exc
