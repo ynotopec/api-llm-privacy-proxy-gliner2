@@ -1,64 +1,97 @@
-# api-llm-privacy-proxy-gliner2
+# OpenAI Privacy Filter Proxy GLiNER2
 
-Minimal OpenAI-compatible privacy proxy using `fastino/gliner2-privacy-filter-PII-multi`.
+Proxy OpenAI-compatible `/v1/*` qui filtre les PII avec `fastino/gliner2-privacy-filter-PII-multi` avant transmission vers un backend LLM.
 
-## Start
+## Fonctionnement
+
+Client OpenAI-compatible
+→ `api-llm-privacy-proxy-gliner2`
+→ redaction PII : `[EMAIL_1]`, `[PERSON_1]`, etc.
+→ upstream OpenAI-compatible
+
+## Installation
 
 ```bash
+./install.sh
 cp .env.example .env
-# edit .env: set UPSTREAM_API_KEY and PROXY_API_TOKEN
-./run.sh 0.0.0.0 8000
+nano .env
+source run.sh 0.0.0.0 8088
 ```
 
-Use the most common OpenAI-compatible client base URL shape:
-
-```text
-http://127.0.0.1:8000/v1
-```
-
-The proxy accepts `/v1/...` routes and forwards them to the upstream base URL without duplicating `/v1`. Send the proxy token to this service as the client `Authorization: Bearer ...` token. The proxy replaces it with `UPSTREAM_API_KEY` when forwarding upstream.
-
-## Important variables
+## Variables importantes
 
 ```bash
-UPSTREAM_API_KEY=sk-...
-PROXY_API_TOKEN=your-proxy-token
-#UPSTREAM_BASE_URL=https://api.openai.com/v1
-#GLINER2_MODEL=fastino/gliner2-privacy-filter-PII-multi
-#PII_THRESHOLD=0.5
-#CUDA_VISIBLE_DEVICES=0
+INBOUND_API_KEYS='change-me'
+UPSTREAM_BASE_URL='http://127.0.0.1:8000/v1'
+UPSTREAM_API_KEY=''
+PRIVACY_MODEL_ID='fastino/gliner2-privacy-filter-PII-multi'
+DEVICE=auto
+TORCH_DTYPE=auto
+FILTER_OUTPUT=true
+MODEL_SUFFIX='-anonym'
 ```
 
-## Install layout
+## Test
 
-`run.sh` auto-runs the idempotent, upgrade-compatible `install.sh` when the virtualenv is missing. `install.sh` uses `uv` and installs into:
-
-```text
-~/venv/api-llm-privacy-proxy-gliner2
+```bash
+pytest -q
 ```
 
-Run `./install.sh` again to upgrade dependencies/code in the same virtualenv. Set `AUTO_INSTALL=0` if `run.sh` should fail instead of installing automatically.
+## Appel OpenAI-compatible
 
-## systemd example
+```bash
+curl -s http://127.0.0.1:8088/v1/chat/completions \
+  -H 'Authorization: Bearer change-me' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "ai-vision-anonym",
+    "messages": [
+      {
+        "role": "user",
+        "content": "ré-écrire au propre mon login antonio et mon mot de passe toto"
+      }
+    ]
+  }' | jq .
+```
 
-```ini
+## Metrics
+
+```bash
+curl -s http://127.0.0.1:8088/metrics \
+  -H 'Authorization: Bearer change-me'
+```
+
+## Notes production
+
+* Par défaut, le proxy filtre les entrées envoyées au LLM et les réponses du LLM (`FILTER_OUTPUT=true`).
+* Les modèles exposés au client sont suffixés avec `-anonym` (`MODEL_SUFFIX`) et seul le champ `model` OpenAI de premier niveau est désuffixé avant envoi à l’upstream.
+* Les configurations utilisateur comme `thinking` / `reasoning` sont préservées telles quelles par défaut.
+* `FILTER_OUTPUT=false` permet de désactiver le filtrage des réponses si la latence est prioritaire.
+* Le modèle peut rater des PII, surtout hors anglais ou avec formats métier spécifiques.
+* Pour contexte gouvernement / médical / RH / finance, valider sur corpus interne et ajouter éventuellement règles regex métier ou fine-tuning.
+
+## Service systemd exemple
+
+```bash
+sudo tee /etc/systemd/system/api-llm-privacy-proxy-gliner2.service >/dev/null <<'SERVICE_EOF'
+[Unit]
+Description=OpenAI Privacy Filter Proxy GLiNER2
+After=network-online.target
+Wants=network-online.target
+
 [Service]
-WorkingDirectory=/opt/api-llm-privacy-proxy-gliner2
-ExecStart=/bin/bash -lc 'source /opt/api-llm-privacy-proxy-gliner2/run.sh 0.0.0.0 8000'
+User=ailab
+WorkingDirectory=/home/ailab/api-llm-privacy-proxy-gliner2
+Environment=VENV_DIR=/home/ailab/venv/api-llm-privacy-proxy-gliner2
+ExecStart=/bin/bash -lc 'source ./run.sh 0.0.0.0 8088'
 Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now api-llm-privacy-proxy-gliner2
+sudo journalctl -u api-llm-privacy-proxy-gliner2 -f
 ```
-
-## API
-
-The proxy forwards popular OpenAI-compatible routes such as:
-
-- `/v1/chat/completions`
-- `/v1/responses`
-- `/v1/embeddings`
-- `/v1/completions`
-
-Text in chat `messages[].content`, multimodal text parts, and top-level `input` is redacted before forwarding.
-
-## GPU hosts
-
-The runner sets safe CUDA defaults for NVIDIA H100 / DGX Spark class hosts and can be overridden in `.env`.
