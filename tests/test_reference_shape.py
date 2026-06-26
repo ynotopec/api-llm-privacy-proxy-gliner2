@@ -26,6 +26,8 @@ def test_gliner2_extract_entities_receives_entity_types():
     assert 'extract_entities(text, settings.entity_types)' in SOURCE
 
 
-def test_health_exposes_entity_types_revision_marker():
-    assert 'APP_REVISION = "gliner2-entity-types"' in SOURCE
+def test_health_exposes_device_revision_marker():
+    assert 'APP_REVISION = "gliner2-device-health"' in SOURCE
     assert '"revision": APP_REVISION' in SOURCE
+    assert '"resolved_device": sanitizer.model_device' in SOURCE
+    assert '"cuda_available": sanitizer.cuda_available' in SOURCE

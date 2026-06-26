@@ -37,7 +37,7 @@ load_env_file()
 LOG_LEVEL = os.getenv("LOG_LEVEL", "info").upper()
 logging.basicConfig(level=LOG_LEVEL)
 log = logging.getLogger("llm-privacy-proxy")
-APP_REVISION = "gliner2-entity-types"
+APP_REVISION = "gliner2-device-health"
 
 
 @dataclass
@@ -217,8 +217,38 @@ def normalize_label(label: str) -> str:
 class PrivacySanitizer:
     def __init__(self) -> None:
         self.model = None
+        self.model_device = "unloaded"
+        self.cuda_available: bool | None = None
         self._last_used_at = 0.0
         self._load_lock = asyncio.Lock()
+
+    def _resolve_device(self) -> str:
+        requested = settings.device.strip().lower()
+        if requested in {"", "auto"}:
+            try:
+                import torch
+
+                self.cuda_available = bool(torch.cuda.is_available())
+                return "cuda" if self.cuda_available else "cpu"
+            except Exception:
+                self.cuda_available = None
+                return "cpu"
+        return requested
+
+    def _move_model_to_device(self, device: str) -> None:
+        if self.model is None:
+            return
+        if hasattr(self.model, "to"):
+            self.model.to(device)
+            self.model_device = device
+            return
+        inner_model = getattr(self.model, "model", None)
+        if hasattr(inner_model, "to"):
+            inner_model.to(device)
+            self.model_device = device
+            return
+        self.model_device = "unknown"
+        log.warning("Privacy model does not expose a .to(...) method; requested device=%s", device)
 
     def _touch(self) -> None:
         self._last_used_at = time.monotonic()
@@ -234,6 +264,7 @@ class PrivacySanitizer:
             return
         log.info("Unloading privacy model after %.1fs of inactivity", idle_for)
         self.model = None
+        self.model_device = "unloaded"
         gc.collect()
 
     async def ensure_loaded(self) -> None:
@@ -243,12 +274,14 @@ class PrivacySanitizer:
         async with self._load_lock:
             if self.model is not None:
                 return
-            log.info("Loading privacy model: %s", settings.privacy_model_id)
+            device = self._resolve_device()
+            log.info("Loading privacy model: %s on device=%s", settings.privacy_model_id, device)
             from gliner2 import GLiNER2
 
             self.model = GLiNER2.from_pretrained(settings.privacy_model_id)
+            self._move_model_to_device(device)
             self._touch()
-            log.info("Privacy model loaded")
+            log.info("Privacy model loaded on device=%s cuda_available=%s", self.model_device, self.cuda_available)
 
     def count_tokens(self, text: str) -> int:
         return max(1, len(text.split())) if text else 0
@@ -381,6 +414,10 @@ async def health() -> dict[str, Any]:
         "upstream": settings.upstream_base_url,
         "filter_output": settings.filter_output,
         "model_suffix": settings.model_suffix,
+        "device": settings.device,
+        "resolved_device": sanitizer.model_device,
+        "cuda_available": sanitizer.cuda_available,
+        "model_loaded": sanitizer.model is not None,
         "revision": APP_REVISION,
     }
 
