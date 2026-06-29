@@ -30,6 +30,8 @@ DEVICE=auto  # auto => cuda si torch.cuda.is_available(), sinon cpu
 TORCH_DTYPE=auto
 FILTER_OUTPUT=true
 MODEL_SUFFIX='-anonym'
+MODEL_IDLE_UNLOAD_SECONDS=300  # <= 0 désactive le déchargement automatique
+MODEL_IDLE_CHECK_SECONDS=30     # fréquence de vérification en tâche de fond
 ```
 
 ## Test
@@ -67,8 +69,11 @@ Champs utiles :
 * `resolved_device` : périphérique réellement utilisé par le modèle chargé (`cuda`, `cpu`, `unloaded` ou `unknown`).
 * `cuda_available` : résultat de `torch.cuda.is_available()` lorsque `DEVICE=auto`.
 * `model_loaded` : indique si le modèle GLiNER2 est déjà chargé en mémoire.
+* `model_idle_unload_seconds` / `model_idle_check_seconds` : délai d'inactivité et fréquence de la tâche de fond qui décharge le modèle.
 
 Si `resolved_device=cpu` avec `DEVICE=auto`, le conteneur/process ne voit pas CUDA. Vérifier l'image PyTorch CUDA, le runtime NVIDIA (`--gpus all`) et les drivers hôte. Pour isoler la latence GLiNER2 de la latence upstream, lire aussi les en-têtes `x-privacy-filter-latency-ms`, `x-privacy-filtered-spans` et `x-privacy-filtered-output-spans`.
+
+Le proxy reprend le comportement mémoire du projet de référence `ynotopec/api-llm-privacy-proxy` (`MODEL_IDLE_UNLOAD_SECONDS`), mais ajoute une tâche de fond : le modèle est déchargé même si aucune nouvelle requête ne vient déclencher le contrôle d'inactivité. Le déchargement supprime la référence au modèle, lance `gc.collect()` puis vide le cache CUDA quand PyTorch voit un GPU.
 
 Pour réduire la latence, désactiver le filtrage de sortie si non nécessaire :
 

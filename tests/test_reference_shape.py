@@ -31,3 +31,11 @@ def test_health_exposes_device_revision_marker():
     assert '"revision": APP_REVISION' in SOURCE
     assert '"resolved_device": sanitizer.model_device' in SOURCE
     assert '"cuda_available": sanitizer.cuda_available' in SOURCE
+
+
+def test_model_idle_unload_runs_in_background_and_clears_memory():
+    assert 'MODEL_IDLE_CHECK_SECONDS' in SOURCE
+    assert 'asyncio.create_task(watch(), name="privacy-model-idle-unload")' in SOURCE
+    assert 'torch.cuda.empty_cache()' in SOURCE
+    assert 'await sanitizer.start_idle_unload_watcher()' in SOURCE
+    assert 'await sanitizer.stop_idle_unload_watcher()' in SOURCE
