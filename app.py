@@ -66,6 +66,7 @@ class Settings:
     min_entity_score: float = float(os.getenv("MIN_ENTITY_SCORE", "0.50"))
     max_string_chars: int = int(os.getenv("MAX_STRING_CHARS", "200000"))
     model_idle_unload_seconds: int = int(os.getenv("MODEL_IDLE_UNLOAD_SECONDS", "300"))
+    model_idle_check_seconds: int = int(os.getenv("MODEL_IDLE_CHECK_SECONDS", "30"))
     model_suffix: str = os.getenv("MODEL_SUFFIX", "-anonym")
     skip_json_keys: set[str] = field(
         default_factory=lambda: {
@@ -221,6 +222,7 @@ class PrivacySanitizer:
         self.cuda_available: bool | None = None
         self._last_used_at = 0.0
         self._load_lock = asyncio.Lock()
+        self._unload_task: asyncio.Task[None] | None = None
 
     def _resolve_device(self) -> str:
         requested = settings.device.strip().lower()
@@ -253,6 +255,23 @@ class PrivacySanitizer:
     def _touch(self) -> None:
         self._last_used_at = time.monotonic()
 
+    def _clear_accelerator_cache(self) -> None:
+        try:
+            import torch
+        except Exception:
+            return
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    def unload(self, *, reason: str) -> None:
+        if self.model is None:
+            return
+        log.info("Unloading privacy model: %s", reason)
+        self.model = None
+        self.model_device = "unloaded"
+        gc.collect()
+        self._clear_accelerator_cache()
+
     def unload_if_idle(self) -> None:
         if self.model is None:
             return
@@ -262,10 +281,36 @@ class PrivacySanitizer:
         idle_for = time.monotonic() - self._last_used_at
         if idle_for < timeout:
             return
-        log.info("Unloading privacy model after %.1fs of inactivity", idle_for)
-        self.model = None
-        self.model_device = "unloaded"
-        gc.collect()
+        self.unload(reason=f"idle for {idle_for:.1f}s")
+
+    async def start_idle_unload_watcher(self) -> None:
+        if settings.model_idle_unload_seconds <= 0 or self._unload_task is not None:
+            return
+        interval = max(1, min(settings.model_idle_check_seconds, settings.model_idle_unload_seconds))
+
+        async def watch() -> None:
+            try:
+                while True:
+                    await asyncio.sleep(interval)
+                    async with self._load_lock:
+                        self.unload_if_idle()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Privacy model idle unload watcher stopped unexpectedly")
+
+        self._unload_task = asyncio.create_task(watch(), name="privacy-model-idle-unload")
+
+    async def stop_idle_unload_watcher(self) -> None:
+        task = self._unload_task
+        self._unload_task = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self.unload(reason="application shutdown")
 
     async def ensure_loaded(self) -> None:
         self.unload_if_idle()
@@ -388,6 +433,12 @@ app = FastAPI(title="OpenAI Privacy Filter Proxy GLiNER2", version="1.0.1")
 @app.on_event("startup")
 async def log_revision() -> None:
     log.info("Starting OpenAI Privacy Filter Proxy GLiNER2 revision=%s", APP_REVISION)
+    await sanitizer.start_idle_unload_watcher()
+
+
+@app.on_event("shutdown")
+async def shutdown_sanitizer() -> None:
+    await sanitizer.stop_idle_unload_watcher()
 
 
 def extract_bearer(req: Request) -> str:
@@ -418,6 +469,8 @@ async def health() -> dict[str, Any]:
         "resolved_device": sanitizer.model_device,
         "cuda_available": sanitizer.cuda_available,
         "model_loaded": sanitizer.model is not None,
+        "model_idle_unload_seconds": settings.model_idle_unload_seconds,
+        "model_idle_check_seconds": settings.model_idle_check_seconds,
         "revision": APP_REVISION,
     }
 
