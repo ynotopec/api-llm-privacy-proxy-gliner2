@@ -24,6 +24,7 @@ source run.sh 0.0.0.0 8088
 INBOUND_API_KEYS='change-me'
 UPSTREAM_BASE_URL='http://127.0.0.1:8000/v1'
 UPSTREAM_API_KEY=''
+LLM_ENABLED=true  # false => retourne uniquement le payload anonymisé, sans appeler l'upstream LLM
 PRIVACY_MODEL_ID='fastino/gliner2-privacy-filter-PII-multi'
 PRIVACY_ENTITY_TYPES='person,full_name,first_name,last_name,date_of_birth,email,phone_number,address,street_address,city,state_or_region,postal_code,country,government_id,national_id_number,passport_number,drivers_license_number,tax_id,bank_account,account_number,iban,payment_card,card_number,username,ip_address,password,api_key,access_token,secret'
 DEVICE=auto  # auto => cuda si torch.cuda.is_available(), sinon cpu
@@ -65,6 +66,7 @@ curl -s http://127.0.0.1:8088/health | jq .
 
 Champs utiles :
 
+* `llm_enabled` : indique si le proxy appelle l’upstream LLM (`true`) ou retourne seulement le payload anonymisé (`false`).
 * `device` : valeur demandée par la variable d'environnement `DEVICE`.
 * `resolved_device` : périphérique réellement utilisé par le modèle chargé (`cuda`, `cpu`, `unloaded` ou `unknown`).
 * `cuda_available` : résultat de `torch.cuda.is_available()` lorsque `DEVICE=auto`.
@@ -91,6 +93,7 @@ curl -s http://127.0.0.1:8088/metrics \
 ## Notes production
 
 * Par défaut, le proxy filtre les entrées envoyées au LLM et les réponses du LLM (`FILTER_OUTPUT=true`).
+* `LLM_ENABLED=false` rend le LLM optionnel : les requêtes POST `/v1/chat/completions` gardent le format OpenAI-compatible (`choices[0].message.content`) avec le contenu anonymisé, sans appeler `UPSTREAM_BASE_URL`. Les autres endpoints POST retournent le payload anonymisé et les statistiques de filtrage.
 * Les modèles exposés au client sont suffixés avec `-anonym` (`MODEL_SUFFIX`) et seul le champ `model` OpenAI de premier niveau est désuffixé avant envoi à l’upstream.
 * Les configurations utilisateur comme `thinking` / `reasoning` sont préservées telles quelles par défaut.
 * `FILTER_OUTPUT=false` permet de désactiver le filtrage des réponses si la latence est prioritaire.
