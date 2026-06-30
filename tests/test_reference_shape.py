@@ -27,7 +27,7 @@ def test_gliner2_extract_entities_receives_entity_types():
 
 
 def test_health_exposes_device_revision_marker():
-    assert 'APP_REVISION = "gliner2-device-health"' in SOURCE
+    assert 'APP_REVISION = "gliner2-optional-llm"' in SOURCE
     assert '"revision": APP_REVISION' in SOURCE
     assert '"resolved_device": sanitizer.model_device' in SOURCE
     assert '"cuda_available": sanitizer.cuda_available' in SOURCE
@@ -39,3 +39,10 @@ def test_model_idle_unload_runs_in_background_and_clears_memory():
     assert 'torch.cuda.empty_cache()' in SOURCE
     assert 'await sanitizer.start_idle_unload_watcher()' in SOURCE
     assert 'await sanitizer.stop_idle_unload_watcher()' in SOURCE
+
+
+def test_llm_can_be_disabled_for_sanitize_only_mode():
+    assert 'LLM_ENABLED' in SOURCE
+    assert '"llm_enabled": settings.llm_enabled' in SOURCE
+    assert '"object": "privacy_proxy.sanitized_payload"' in SOURCE
+    assert 'raise HTTPException(status_code=503, detail="llm_disabled")' in SOURCE
