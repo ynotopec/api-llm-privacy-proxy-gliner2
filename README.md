@@ -93,7 +93,7 @@ curl -s http://127.0.0.1:8088/metrics \
 ## Notes production
 
 * Par défaut, le proxy filtre les entrées envoyées au LLM et les réponses du LLM (`FILTER_OUTPUT=true`).
-* `LLM_ENABLED=false` rend le LLM optionnel : les requêtes POST `/v1/*` retournent le payload anonymisé et les statistiques de filtrage sans appeler `UPSTREAM_BASE_URL`.
+* `LLM_ENABLED=false` rend le LLM optionnel : les requêtes POST `/v1/chat/completions` gardent le format OpenAI-compatible (`choices[0].message.content`) avec le contenu anonymisé, sans appeler `UPSTREAM_BASE_URL`. Les autres endpoints POST retournent le payload anonymisé et les statistiques de filtrage.
 * Les modèles exposés au client sont suffixés avec `-anonym` (`MODEL_SUFFIX`) et seul le champ `model` OpenAI de premier niveau est désuffixé avant envoi à l’upstream.
 * Les configurations utilisateur comme `thinking` / `reasoning` sont préservées telles quelles par défaut.
 * `FILTER_OUTPUT=false` permet de désactiver le filtrage des réponses si la latence est prioritaire.

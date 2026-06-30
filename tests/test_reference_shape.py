@@ -45,4 +45,7 @@ def test_llm_can_be_disabled_for_sanitize_only_mode():
     assert 'LLM_ENABLED' in SOURCE
     assert '"llm_enabled": settings.llm_enabled' in SOURCE
     assert '"object": "privacy_proxy.sanitized_payload"' in SOURCE
+    assert '"object": "chat.completion"' in SOURCE
+    assert '"choices"' in SOURCE
+    assert 'sanitized_chat_content(sanitized_payload)' in SOURCE
     assert 'raise HTTPException(status_code=503, detail="llm_disabled")' in SOURCE

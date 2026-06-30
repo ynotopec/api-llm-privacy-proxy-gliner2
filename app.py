@@ -565,6 +565,79 @@ async def forward_request(req: Request, full_path: str, sanitized_payload: Any, 
     return Response(content=upstream.content, status_code=upstream.status_code, headers=headers, media_type=upstream.headers.get("content-type", "application/json"))
 
 
+def text_from_message_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+            elif isinstance(item, str):
+                parts.append(item)
+        return "".join(parts)
+    return ""
+
+
+def sanitized_chat_content(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return ""
+    fallback = ""
+    for message in messages:
+        if isinstance(message, dict):
+            content = text_from_message_content(message.get("content"))
+            if content:
+                fallback = content
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = text_from_message_content(message.get("content"))
+        if content:
+            return content
+    return fallback
+
+
+def llm_disabled_response_payload(full_path: str, sanitized_payload: Any, in_stats: RedactionStats) -> dict[str, Any]:
+    if full_path == "chat/completions" and isinstance(sanitized_payload, dict):
+        return {
+            "id": "privacy-proxy-sanitized",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": suffix_model_id(str(sanitized_payload.get("model", ""))),
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": sanitized_chat_content(sanitized_payload),
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            "privacy": {
+                "filtered_tokens": in_stats.tokens,
+                "filtered_spans": in_stats.spans,
+                "filtered_labels": in_stats.labels,
+            },
+        }
+    return {
+        "object": "privacy_proxy.sanitized_payload",
+        "llm_enabled": False,
+        "data": sanitized_payload,
+        "privacy": {
+            "filtered_tokens": in_stats.tokens,
+            "filtered_spans": in_stats.spans,
+            "filtered_labels": in_stats.labels,
+        },
+    }
+
+
 @app.api_route("/v1/{full_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
 async def proxy_openai(req: Request, full_path: str) -> Response:
     if req.method == "OPTIONS":
@@ -582,16 +655,7 @@ async def proxy_openai(req: Request, full_path: str) -> Response:
     sanitized_payload = rewrite_request_model_ids(sanitized_payload)
     await metrics.add(in_stats.tokens, in_stats.spans, in_stats.labels)
     if not settings.llm_enabled:
-        response_payload = {
-            "object": "privacy_proxy.sanitized_payload",
-            "llm_enabled": False,
-            "data": sanitized_payload,
-            "privacy": {
-                "filtered_tokens": in_stats.tokens,
-                "filtered_spans": in_stats.spans,
-                "filtered_labels": in_stats.labels,
-            },
-        }
+        response_payload = llm_disabled_response_payload(full_path, sanitized_payload, in_stats)
         response = JSONResponse(content=response_payload)
         response.headers["x-privacy-filtered-tokens"] = str(in_stats.tokens)
         response.headers["x-privacy-filtered-spans"] = str(in_stats.spans)
