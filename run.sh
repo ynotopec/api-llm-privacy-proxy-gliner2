@@ -27,6 +27,4 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 exec uvicorn app:app \
   --host "$HOST" \
   --port "$PORT" \
-  --proxy-headers \
-  --forwarded-allow-ips='*' \
   --log-level "${LOG_LEVEL:-info}"

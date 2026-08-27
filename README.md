@@ -22,6 +22,7 @@ source run.sh 0.0.0.0 8088
 
 ```bash
 INBOUND_API_KEYS='change-me'
+ALLOW_UNAUTHENTICATED=false  # opt-in explicite uniquement pour un environnement de confiance
 UPSTREAM_BASE_URL='http://127.0.0.1:8000/v1'
 UPSTREAM_API_KEY=''
 LLM_ENABLED=true  # false => retourne uniquement le payload anonymisé, sans appeler l'upstream LLM
@@ -30,6 +31,8 @@ PRIVACY_ENTITY_TYPES='person,full_name,first_name,last_name,date_of_birth,email,
 DEVICE=auto  # auto => cuda si torch.cuda.is_available(), sinon cpu
 TORCH_DTYPE=auto
 FILTER_OUTPUT=true
+MAX_REQUEST_BYTES=10485760  # limite le corps JSON à 10 MiB
+MAX_STRING_CHARS=200000     # une chaîne plus grande est rejetée, jamais transmise sans filtrage
 MODEL_SUFFIX='-anonym'
 MODEL_IDLE_UNLOAD_SECONDS=300  # <= 0 désactive le déchargement automatique
 MODEL_IDLE_CHECK_SECONDS=30     # fréquence de vérification en tâche de fond
@@ -92,6 +95,11 @@ curl -s http://127.0.0.1:8088/metrics \
 
 ## Notes production
 
+* L'authentification est fermée par défaut : sans `INBOUND_API_KEYS`, les routes proxy renvoient `503`. `ALLOW_UNAUTHENTICATED=true` constitue un opt-in explicite.
+* Les jetons `Authorization`, cookies et en-têtes de proxy du client ne sont jamais relayés à l'upstream. Seul `UPSTREAM_API_KEY` configure son jeton Bearer.
+* Les chemins ambigus et corps trop volumineux sont rejetés. Une chaîne dépassant `MAX_STRING_CHARS` est également rejetée au lieu de contourner le filtre.
+* Le streaming est rejeté lorsque `FILTER_OUTPUT=true`, car une réponse SSE ne peut pas être anonymisée de manière fiable par le filtre JSON. Définir explicitement `FILTER_OUTPUT=false` pour autoriser le streaming.
+* L'image Docker s'exécute avec un utilisateur non privilégié et ne fait pas confiance aux en-têtes `X-Forwarded-*` de n'importe quelle adresse.
 * Par défaut, le proxy filtre les entrées envoyées au LLM et les réponses du LLM (`FILTER_OUTPUT=true`).
 * `LLM_ENABLED=false` rend le LLM optionnel : les requêtes POST `/v1/chat/completions` gardent le format OpenAI-compatible (`choices[0].message.content`) avec le contenu anonymisé, sans appeler `UPSTREAM_BASE_URL`. Les autres endpoints POST retournent le payload anonymisé et les statistiques de filtrage.
 * Les modèles exposés au client sont suffixés avec `-anonym` (`MODEL_SUFFIX`) et seul le champ `model` OpenAI de premier niveau est désuffixé avant envoi à l’upstream.

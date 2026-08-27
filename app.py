@@ -5,6 +5,8 @@ import gc
 import json
 import logging
 import os
+import re
+import secrets
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -47,6 +49,7 @@ class Settings:
     inbound_api_keys: list[str] = field(
         default_factory=lambda: [x.strip() for x in os.getenv("INBOUND_API_KEYS", "").split(",") if x.strip()]
     )
+    allow_unauthenticated: bool = os.getenv("ALLOW_UNAUTHENTICATED", "false").lower() in {"1", "true", "yes", "on"}
     upstream_base_url: str = os.getenv("UPSTREAM_BASE_URL", "http://127.0.0.1:8000/v1").rstrip("/")
     upstream_api_key: str = os.getenv("UPSTREAM_API_KEY", "")
     llm_enabled: bool = os.getenv("LLM_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
@@ -66,6 +69,7 @@ class Settings:
     filter_output: bool = os.getenv("FILTER_OUTPUT", "true").lower() in {"1", "true", "yes", "on"}
     min_entity_score: float = float(os.getenv("MIN_ENTITY_SCORE", "0.50"))
     max_string_chars: int = int(os.getenv("MAX_STRING_CHARS", "200000"))
+    max_request_bytes: int = int(os.getenv("MAX_REQUEST_BYTES", "10485760"))
     model_idle_unload_seconds: int = int(os.getenv("MODEL_IDLE_UNLOAD_SECONDS", "300"))
     model_idle_check_seconds: int = int(os.getenv("MODEL_IDLE_CHECK_SECONDS", "30"))
     model_suffix: str = os.getenv("MODEL_SUFFIX", "-anonym")
@@ -213,7 +217,8 @@ class RedactionContext:
 def normalize_label(label: str) -> str:
     label = label or "private"
     label = label.replace("B-", "").replace("I-", "").replace("E-", "").replace("S-", "")
-    return label.lower()
+    normalized = re.sub(r"[^a-z0-9_]+", "_", label.lower()).strip("_")
+    return (normalized or "private")[:64]
 
 
 class PrivacySanitizer:
@@ -333,8 +338,12 @@ class PrivacySanitizer:
         return max(1, len(text.split())) if text else 0
 
     async def sanitize_text(self, text: str, ctx: RedactionContext, stats: RedactionStats) -> str:
-        if not text or len(text) > settings.max_string_chars:
+        if not text:
             return text
+        # Passing oversized values through unchanged would create a trivial privacy-filter
+        # bypass. Reject them instead so sensitive data can never reach the upstream.
+        if len(text) > settings.max_string_chars:
+            raise HTTPException(status_code=413, detail="string_too_large_to_sanitize")
         await self.ensure_loaded()
         self._touch()
         try:
@@ -452,9 +461,12 @@ def extract_bearer(req: Request) -> str:
 def require_auth(req: Request, *, metrics_auth: bool = False) -> None:
     if metrics_auth and not settings.metrics_require_auth:
         return
-    if not settings.inbound_api_keys:
+    if not settings.inbound_api_keys and settings.allow_unauthenticated:
         return
-    if extract_bearer(req) not in settings.inbound_api_keys:
+    if not settings.inbound_api_keys:
+        raise HTTPException(status_code=503, detail="inbound_auth_not_configured")
+    supplied = extract_bearer(req)
+    if not any(secrets.compare_digest(supplied, expected) for expected in settings.inbound_api_keys):
         raise HTTPException(status_code=401, detail="invalid_or_missing_api_token")
 
 
@@ -463,7 +475,6 @@ async def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "model": settings.privacy_model_id,
-        "upstream": settings.upstream_base_url,
         "llm_enabled": settings.llm_enabled,
         "filter_output": settings.filter_output,
         "model_suffix": settings.model_suffix,
@@ -495,6 +506,14 @@ def build_upstream_headers(req: Request) -> dict[str, str]:
         "trailers",
         "transfer-encoding",
         "upgrade",
+        # Client credentials and ambient browser credentials must never be
+        # disclosed to the upstream service.
+        "authorization",
+        "cookie",
+        "forwarded",
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-forwarded-proto",
     }
     headers = {key: value for key, value in req.headers.items() if key.lower() not in excluded}
     if settings.upstream_api_key:
@@ -512,6 +531,15 @@ def response_models_endpoint(full_path: str) -> bool:
     return full_path == "models" or full_path.startswith("models/")
 
 
+def validate_upstream_path(full_path: str) -> str:
+    """Reject path forms that can be interpreted differently by proxies/clients."""
+    if not full_path or "\\" in full_path or any(ord(char) < 32 for char in full_path):
+        raise HTTPException(status_code=400, detail="invalid_upstream_path")
+    if any(segment in {"", ".", ".."} for segment in full_path.split("/")):
+        raise HTTPException(status_code=400, detail="invalid_upstream_path")
+    return full_path
+
+
 def add_response_model_suffixes(upstream_resp: Response, full_path: str) -> Response:
     content_type = upstream_resp.headers.get("content-type", "")
     if "application/json" not in content_type:
@@ -527,7 +555,7 @@ def add_response_model_suffixes(upstream_resp: Response, full_path: str) -> Resp
 async def forward_request(req: Request, full_path: str, sanitized_payload: Any, stream: bool = False) -> Response:
     if not settings.llm_enabled:
         raise HTTPException(status_code=503, detail="llm_disabled")
-    full_path = unsuffix_model_path(full_path)
+    full_path = validate_upstream_path(unsuffix_model_path(full_path))
     url = f"{settings.upstream_base_url}/{full_path}"
     timeout = httpx.Timeout(600.0, connect=30.0)
     if stream:
@@ -643,11 +671,24 @@ async def proxy_openai(req: Request, full_path: str) -> Response:
     if req.method == "OPTIONS":
         return Response(status_code=204)
     require_auth(req)
+    validate_upstream_path(full_path)
     if req.method in {"GET", "DELETE"}:
         upstream_resp = await forward_request(req, full_path, sanitized_payload=None)
         return add_response_model_suffixes(upstream_resp, full_path)
+    content_length = req.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > settings.max_request_bytes:
+                raise HTTPException(status_code=413, detail="request_body_too_large")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="invalid_content_length") from exc
     try:
-        payload = await req.json()
+        body = await req.body()
+        if len(body) > settings.max_request_bytes:
+            raise HTTPException(status_code=413, detail="request_body_too_large")
+        payload = json.loads(body)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=400, detail="expected_json_body") from exc
     start = time.perf_counter()
@@ -662,6 +703,8 @@ async def proxy_openai(req: Request, full_path: str) -> Response:
         response.headers["x-privacy-filter-latency-ms"] = str(round((time.perf_counter() - start) * 1000, 2))
         return response
     wants_stream = bool(isinstance(payload, dict) and payload.get("stream") is True)
+    if wants_stream and settings.filter_output:
+        raise HTTPException(status_code=400, detail="streaming_incompatible_with_output_filtering")
     if wants_stream:
         return await forward_request(req, full_path, sanitized_payload, stream=True)
     upstream_resp = await forward_request(req, full_path, sanitized_payload, stream=False)
@@ -671,10 +714,14 @@ async def proxy_openai(req: Request, full_path: str) -> Response:
     rewritten_resp = add_response_model_suffixes(upstream_resp, full_path)
     content_type = rewritten_resp.headers.get("content-type", "")
     if "application/json" not in content_type:
+        if settings.filter_output:
+            raise HTTPException(status_code=502, detail="unfilterable_upstream_response")
         return rewritten_resp
     try:
         response_payload = json.loads(rewritten_resp.body)
-    except Exception:
+    except Exception as exc:
+        if settings.filter_output:
+            raise HTTPException(status_code=502, detail="invalid_upstream_json") from exc
         return rewritten_resp
     out_stats = RedactionStats()
     if settings.filter_output:
