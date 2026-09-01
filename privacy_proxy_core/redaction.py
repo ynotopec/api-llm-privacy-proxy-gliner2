@@ -145,8 +145,10 @@ class PrivacySanitizerBase:
         import time
         self._last_used_at = time.monotonic()
 
-    def unload_if_idle(self, settings: Any) -> None:
+    def unload_if_idle(self, settings: Any = None) -> None:
         """Unload model if idle beyond the configured timeout."""
+        if settings is None:
+            from .settings import settings
         timeout = settings.model_idle_unload_seconds
         if timeout <= 0 or self._last_used_at == 0:
             return

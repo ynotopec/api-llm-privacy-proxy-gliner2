@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import asyncio
-import gc
 import json
 import logging
 import os
 import time
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -41,6 +38,7 @@ class GLiNER2ProxySanitizer(PrivacySanitizerBase):
             self._delegate = GLiNER2Sanitizer(
                 settings.privacy_model_id,
                 device=settings.device,
+                torch_dtype_str=settings.torch_dtype,
                 entity_types=entity_types,
                 min_score=settings.min_entity_score,
             )
@@ -53,9 +51,27 @@ class GLiNER2ProxySanitizer(PrivacySanitizerBase):
     async def sanitize_text(
         self, text: str, ctx: RedactionContext, stats: RedactionStats,
     ) -> str:
-        if self._delegate is None:
-            return text
+        await self.ensure_loaded()
         return await self._delegate.sanitize_text(text, ctx, stats)
+
+    async def start_idle_watcher(self) -> None:
+        await self.ensure_loaded()
+
+    async def stop_idle_watcher(self) -> None:
+        if self._delegate is not None:
+            await self._delegate.stop_idle_watcher()
+
+    @property
+    def model_device(self) -> str:
+        if self._delegate is None:
+            return "unloaded"
+        return self._delegate.model_device
+
+    @property
+    def cuda_available(self) -> bool | None:
+        if self._delegate is None:
+            return None
+        return self._delegate.cuda_available
 
     def count_tokens(self, text: str) -> int:
         return max(1, len(text.split())) if text else 0
@@ -89,17 +105,6 @@ sanitizer = GLiNER2ProxySanitizer()
 app = FastAPI(title="OpenAI Privacy Filter Proxy GLiNER2", version="1.0.1")
 
 # ── routes (identiques aux autres repos via le core) ────────────
-
-async def _startup_sanitizer() -> None:
-    log = logging.getLogger("llm-privacy-proxy")
-    log.info("Starting GLiNER2 proxy revision=%s", APP_REVISION)
-    await sanitizer.ensure_loaded()
-
-
-async def _shutdown_sanitizer() -> None:
-    if hasattr(sanitizer, "_delegate") and sanitizer._delegate is not None:
-        await sanitizer._delegate.stop_idle_watcher()
-
 
 @app.on_event("startup")
 async def log_revision() -> None:
@@ -139,9 +144,9 @@ def rewrite_response_model_ids(value: Any, *, models_endpoint: bool = False) -> 
         object_id = out.get("id")
         if isinstance(object_id, str) and out.get("object") == "model":
             out["id"] = suffix_model_id(object_id)
-        data = out.get("data")
-        if isinstance(data, list):
-            out["data"] = [rewrite_response_model_ids(item, models_endpoint=True) for item in data]
+    data = out.get("data")
+    if isinstance(data, list):
+        out["data"] = [rewrite_response_model_ids(item, models_endpoint=True) for item in data]
     return out
 
 
@@ -344,6 +349,8 @@ async def health() -> Dict[str, Any]:
         "filter_output": settings.filter_output,
         "model_suffix": settings.model_suffix,
         "device": settings.device,
+        "resolved_device": sanitizer.model_device,
+        "cuda_available": sanitizer.cuda_available,
         "model_idle_unload_seconds": settings.model_idle_unload_seconds,
         "revision": APP_REVISION,
     }

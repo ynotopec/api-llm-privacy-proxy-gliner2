@@ -37,6 +37,14 @@ class GLiNER2Sanitizer(PrivacySanitizerBase):
         self._load_lock = asyncio.Lock()
         self._unload_task: asyncio.Task[None] | None = None
 
+    @property
+    def model_device(self) -> str:
+        return self._model_device
+
+    @property
+    def cuda_available(self) -> bool | None:
+        return self._cuda_available
+
     def _on_idle_unload(self) -> None:
         log.info("Unloading GLiNER2 model after idle timeout")
         self.model = None
@@ -100,6 +108,7 @@ class GLiNER2Sanitizer(PrivacySanitizerBase):
             if self.model is not None:
                 return
             device = self._resolve_device(self.device)
+            self._cuda_available = bool(torch.cuda.is_available())
             log.info("Loading GLiNER2 model: %s on %s", self.model_id, device)
 
             from gliner2 import GLiNER2
