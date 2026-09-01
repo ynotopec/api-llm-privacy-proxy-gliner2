@@ -4,6 +4,26 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
+
+
+def load_env_file(path: str = ".env") -> None:
+    """Load simple KEY=VALUE entries without overriding the process environment."""
+    env_path = Path(path)
+    if not env_path.exists():
+        return
+    for raw_line in env_path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            os.environ.setdefault(key, value)
+
+
+load_env_file()
 
 
 def _parse_bool(value: str, default: bool) -> bool:
@@ -32,16 +52,18 @@ class Settings:
     )
 
     # ── upstream ──────────────────────────────────────────────────
-    upstream_base_url: str = os.getenv("UPSTREAM_BASE_URL", "").rstrip("/")
+    upstream_base_url: str = os.getenv(
+        "UPSTREAM_BASE_URL", "http://127.0.0.1:8000/v1"
+    ).rstrip("/")
     upstream_api_key: str = os.getenv("UPSTREAM_API_KEY", "")
-
-    @property
-    def llm_enabled(self) -> bool:
-        """Whether the upstream LLM should be called."""
-        return bool(self.upstream_base_url)
+    llm_enabled: bool = field(
+        default_factory=lambda: _parse_bool(os.getenv("LLM_ENABLED", "true"), True)
+    )
 
     # ── privacy model ─────────────────────────────────────────────
-    privacy_model_id: str = os.getenv("PRIVACY_MODEL_ID", "")
+    privacy_model_id: str = os.getenv(
+        "PRIVACY_MODEL_ID", "fastino/gliner2-privacy-filter-PII-multi"
+    )
 
     device: str = os.getenv("DEVICE", "auto")
     torch_dtype: str = os.getenv("TORCH_DTYPE", "auto")
@@ -55,6 +77,7 @@ class Settings:
     model_idle_unload_seconds: int = int(
         os.getenv("MODEL_IDLE_UNLOAD_SECONDS", "300")
     )
+    model_idle_check_seconds: int = int(os.getenv("MODEL_IDLE_CHECK_SECONDS", "30"))
     model_suffix: str = os.getenv("MODEL_SUFFIX", "-anonym")
     skip_json_keys: set[str] = field(
         default_factory=lambda: {
