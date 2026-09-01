@@ -7,102 +7,110 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
-from pathlib import Path
+from privacy_proxy_core.redaction import PrivacySanitizerBase, RedactionContext, RedactionStats
+from privacy_proxy_core.metrics import GlobalMetrics, metrics
+from privacy_proxy_core.settings import Settings, settings, suffix_model_id, unsuffix_model_id, unsuffix_model_path
+
+APP_REVISION = "core-integration"
 
 
-def load_env_file(path: str = ".env") -> None:
-    env_path = Path(path)
-    if not env_path.exists():
-        return
-    for raw_line in env_path.read_text().splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip("\"").strip("'")
-        if key and key not in os.environ:
-            os.environ[key] = value
+class GLiNER2ProxySanitizer(PrivacySanitizerBase):
+    _delegate = None
+
+    async def ensure_loaded(self) -> None:
+        from privacy_proxy_core.sanitizers.gliner2 import GLiNER2Sanitizer
+        if self._delegate is None:
+            entity_types = [
+                x.strip()
+                for x in os.getenv(
+                    "PRIVACY_ENTITY_TYPES",
+                    "person,full_name,first_name,last_name,date_of_birth,email,phone_number,address,"
+                    "street_address,city,state_or_region,postal_code,country,government_id,national_id_number,"
+                    "passport_number,drivers_license_number,tax_id,bank_account,account_number,iban,"
+                    "payment_card,card_number,username,ip_address,password,api_key,access_token,secret",
+                ).split(",")
+                if x.strip()
+            ]
+            self._delegate = GLiNER2Sanitizer(
+                settings.privacy_model_id,
+                device=settings.device,
+                entity_types=entity_types,
+                min_score=settings.min_entity_score,
+            )
+            if settings.model_idle_unload_seconds > 0:
+                check_interval = int(os.getenv("MODEL_IDLE_CHECK_SECONDS", "30"))
+                await self._delegate.start_idle_watcher(check_interval=check_interval)
+        self._delegate.unload_if_idle()
+        await self._delegate.ensure_loaded()
+
+    async def sanitize_text(
+        self, text: str, ctx: RedactionContext, stats: RedactionStats,
+    ) -> str:
+        if self._delegate is None:
+            return text
+        return await self._delegate.sanitize_text(text, ctx, stats)
+
+    def count_tokens(self, text: str) -> int:
+        return max(1, len(text.split())) if text else 0
+
+    async def sanitize_payload(
+        self, payload: Any, settings: Settings,
+    ) -> tuple[Any, RedactionStats]:
+        from privacy_proxy_core.redaction import RedactionContext, RedactionStats
+        ctx = RedactionContext()
+        stats = RedactionStats()
+        sanitized = await self._sanitize_any(payload, ctx, stats, None, settings)
+        return sanitized, stats
+
+    async def _sanitize_any(
+        self, value: Any, ctx: RedactionContext, stats: RedactionStats,
+        parent_key: Optional[str], settings: Settings,
+    ) -> Any:
+        if parent_key in settings.skip_json_keys:
+            return value
+        if isinstance(value, str):
+            return await self.sanitize_text(value, ctx, stats)
+        if isinstance(value, list):
+            return [await self._sanitize_any(v, ctx, stats, None, settings) for v in value]
+        if isinstance(value, dict):
+            return {k: await self._sanitize_any(v, ctx, stats, k, settings) for k, v in value.items()}
+        return value
 
 
-load_env_file()
+sanitizer = GLiNER2ProxySanitizer()
 
-LOG_LEVEL = os.getenv("LOG_LEVEL", "info").upper()
-logging.basicConfig(level=LOG_LEVEL)
-log = logging.getLogger("llm-privacy-proxy")
-APP_REVISION = "gliner2-optional-llm"
+app = FastAPI(title="OpenAI Privacy Filter Proxy GLiNER2", version="1.0.1")
 
+# ── routes (identiques aux autres repos via le core) ────────────
 
-@dataclass
-class Settings:
-    host: str = os.getenv("HOST", "0.0.0.0")
-    port: int = int(os.getenv("PORT", "8088"))
-    inbound_api_keys: list[str] = field(
-        default_factory=lambda: [x.strip() for x in os.getenv("INBOUND_API_KEYS", "").split(",") if x.strip()]
-    )
-    upstream_base_url: str = os.getenv("UPSTREAM_BASE_URL", "http://127.0.0.1:8000/v1").rstrip("/")
-    upstream_api_key: str = os.getenv("UPSTREAM_API_KEY", "")
-    llm_enabled: bool = os.getenv("LLM_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
-    privacy_model_id: str = os.getenv("PRIVACY_MODEL_ID", "fastino/gliner2-privacy-filter-PII-multi")
-    entity_types: list[str] = field(
-        default_factory=lambda: [
-            x.strip()
-            for x in os.getenv(
-                "PRIVACY_ENTITY_TYPES",
-                "person,full_name,first_name,last_name,date_of_birth,email,phone_number,address,street_address,city,state_or_region,postal_code,country,government_id,national_id_number,passport_number,drivers_license_number,tax_id,bank_account,account_number,iban,payment_card,card_number,username,ip_address,password,api_key,access_token,secret",
-            ).split(",")
-            if x.strip()
-        ]
-    )
-    device: str = os.getenv("DEVICE", "auto")
-    torch_dtype: str = os.getenv("TORCH_DTYPE", "auto")
-    filter_output: bool = os.getenv("FILTER_OUTPUT", "true").lower() in {"1", "true", "yes", "on"}
-    min_entity_score: float = float(os.getenv("MIN_ENTITY_SCORE", "0.50"))
-    max_string_chars: int = int(os.getenv("MAX_STRING_CHARS", "200000"))
-    model_idle_unload_seconds: int = int(os.getenv("MODEL_IDLE_UNLOAD_SECONDS", "300"))
-    model_idle_check_seconds: int = int(os.getenv("MODEL_IDLE_CHECK_SECONDS", "30"))
-    model_suffix: str = os.getenv("MODEL_SUFFIX", "-anonym")
-    skip_json_keys: set[str] = field(
-        default_factory=lambda: {
-            x.strip()
-            for x in os.getenv(
-                "SKIP_JSON_KEYS",
-                "model,role,type,stream,temperature,max_tokens,top_p,tools,tool_choice,name,thinking,reasoning,reasoning_effort",
-            ).split(",")
-            if x.strip()
-        }
-    )
-    metrics_require_auth: bool = os.getenv("METRICS_REQUIRE_AUTH", "true").lower() in {"1", "true", "yes", "on"}
+async def _startup_sanitizer() -> None:
+    log = logging.getLogger("llm-privacy-proxy")
+    log.info("Starting GLiNER2 proxy revision=%s", APP_REVISION)
+    await sanitizer.ensure_loaded()
 
 
-settings = Settings()
+async def _shutdown_sanitizer() -> None:
+    if hasattr(sanitizer, "_delegate") and sanitizer._delegate is not None:
+        await sanitizer._delegate.stop_idle_watcher()
 
 
-def suffix_model_id(model_id: str) -> str:
-    if not model_id or not settings.model_suffix or model_id.endswith(settings.model_suffix):
-        return model_id
-    return f"{model_id}{settings.model_suffix}"
+@app.on_event("startup")
+async def log_revision() -> None:
+    log = logging.getLogger("llm-privacy-proxy")
+    log.info("Starting OpenAI Privacy Filter Proxy GLiNER2 revision=%s", APP_REVISION)
+    await sanitizer.start_idle_watcher()
 
 
-def unsuffix_model_id(model_id: str) -> str:
-    suffix = settings.model_suffix
-    if suffix and model_id.endswith(suffix) and len(model_id) > len(suffix):
-        return model_id[: -len(suffix)]
-    return model_id
-
-
-def unsuffix_model_path(full_path: str) -> str:
-    parts = full_path.split("/")
-    if len(parts) >= 2 and parts[0] == "models":
-        parts[1] = unsuffix_model_id(parts[1])
-    return "/".join(parts)
+@app.on_event("shutdown")
+async def shutdown_sanitizer() -> None:
+    await sanitizer.stop_idle_watcher()
 
 
 def rewrite_request_model_ids(value: Any) -> Any:
@@ -131,315 +139,10 @@ def rewrite_response_model_ids(value: Any, *, models_endpoint: bool = False) -> 
         object_id = out.get("id")
         if isinstance(object_id, str) and out.get("object") == "model":
             out["id"] = suffix_model_id(object_id)
-    data = out.get("data")
-    if isinstance(data, list):
-        out["data"] = [rewrite_response_model_ids(item, models_endpoint=True) for item in data]
+        data = out.get("data")
+        if isinstance(data, list):
+            out["data"] = [rewrite_response_model_ids(item, models_endpoint=True) for item in data]
     return out
-
-
-class GlobalMetrics:
-    def __init__(self) -> None:
-        self.lock = asyncio.Lock()
-        self.requests_total = 0
-        self.filtered_requests_total = 0
-        self.filtered_tokens_total = 0
-        self.filtered_spans_total = 0
-        self.filtered_by_label: dict[str, int] = {}
-
-    async def add(self, tokens: int, spans: int, labels: dict[str, int], *, count_request: bool = True) -> None:
-        async with self.lock:
-            if count_request:
-                self.requests_total += 1
-            if tokens > 0 or spans > 0:
-                self.filtered_requests_total += 1
-            self.filtered_tokens_total += tokens
-            self.filtered_spans_total += spans
-            for key, value in labels.items():
-                self.filtered_by_label[key] = self.filtered_by_label.get(key, 0) + value
-
-    async def prometheus(self) -> str:
-        async with self.lock:
-            lines = [
-                "# HELP privacy_proxy_requests_total Total proxied requests.",
-                "# TYPE privacy_proxy_requests_total counter",
-                f"privacy_proxy_requests_total {self.requests_total}",
-                "# HELP privacy_proxy_filtered_requests_total Requests where at least one span was filtered.",
-                "# TYPE privacy_proxy_filtered_requests_total counter",
-                f"privacy_proxy_filtered_requests_total {self.filtered_requests_total}",
-                "# HELP privacy_proxy_filtered_tokens_total Estimated number of tokens filtered.",
-                "# TYPE privacy_proxy_filtered_tokens_total counter",
-                f"privacy_proxy_filtered_tokens_total {self.filtered_tokens_total}",
-                "# HELP privacy_proxy_filtered_spans_total Number of PII spans filtered.",
-                "# TYPE privacy_proxy_filtered_spans_total counter",
-                f"privacy_proxy_filtered_spans_total {self.filtered_spans_total}",
-            ]
-            for label, count in sorted(self.filtered_by_label.items()):
-                safe = label.replace('"', '\\"')
-                lines.append(f'privacy_proxy_filtered_spans_by_label_total{{label="{safe}"}} {count}')
-            return "\n".join(lines) + "\n"
-
-
-metrics = GlobalMetrics()
-
-
-@dataclass
-class RedactionStats:
-    tokens: int = 0
-    spans: int = 0
-    labels: dict[str, int] = field(default_factory=dict)
-
-    def add(self, label: str, token_count: int) -> None:
-        self.tokens += token_count
-        self.spans += 1
-        self.labels[label] = self.labels.get(label, 0) + 1
-
-
-class RedactionContext:
-    def __init__(self) -> None:
-        self.by_value: dict[tuple[str, str], str] = {}
-        self.next_index: dict[str, int] = {}
-
-    def placeholder(self, label: str, value: str) -> str:
-        label = normalize_label(label)
-        key = (label, value)
-        if key in self.by_value:
-            return self.by_value[key]
-        self.next_index[label] = self.next_index.get(label, 0) + 1
-        placeholder = f"[{label.upper()}_{self.next_index[label]}]"
-        self.by_value[key] = placeholder
-        return placeholder
-
-
-def normalize_label(label: str) -> str:
-    label = label or "private"
-    label = label.replace("B-", "").replace("I-", "").replace("E-", "").replace("S-", "")
-    return label.lower()
-
-
-class PrivacySanitizer:
-    def __init__(self) -> None:
-        self.model = None
-        self.model_device = "unloaded"
-        self.cuda_available: bool | None = None
-        self._last_used_at = 0.0
-        self._load_lock = asyncio.Lock()
-        self._unload_task: asyncio.Task[None] | None = None
-
-    def _resolve_device(self) -> str:
-        requested = settings.device.strip().lower()
-        if requested in {"", "auto"}:
-            try:
-                import torch
-
-                self.cuda_available = bool(torch.cuda.is_available())
-                return "cuda" if self.cuda_available else "cpu"
-            except Exception:
-                self.cuda_available = None
-                return "cpu"
-        return requested
-
-    def _move_model_to_device(self, device: str) -> None:
-        if self.model is None:
-            return
-        if hasattr(self.model, "to"):
-            self.model.to(device)
-            self.model_device = device
-            return
-        inner_model = getattr(self.model, "model", None)
-        if hasattr(inner_model, "to"):
-            inner_model.to(device)
-            self.model_device = device
-            return
-        self.model_device = "unknown"
-        log.warning("Privacy model does not expose a .to(...) method; requested device=%s", device)
-
-    def _touch(self) -> None:
-        self._last_used_at = time.monotonic()
-
-    def _clear_accelerator_cache(self) -> None:
-        try:
-            import torch
-        except Exception:
-            return
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    def unload(self, *, reason: str) -> None:
-        if self.model is None:
-            return
-        log.info("Unloading privacy model: %s", reason)
-        self.model = None
-        self.model_device = "unloaded"
-        gc.collect()
-        self._clear_accelerator_cache()
-
-    def unload_if_idle(self) -> None:
-        if self.model is None:
-            return
-        timeout = settings.model_idle_unload_seconds
-        if timeout <= 0:
-            return
-        idle_for = time.monotonic() - self._last_used_at
-        if idle_for < timeout:
-            return
-        self.unload(reason=f"idle for {idle_for:.1f}s")
-
-    async def start_idle_unload_watcher(self) -> None:
-        if settings.model_idle_unload_seconds <= 0 or self._unload_task is not None:
-            return
-        interval = max(1, min(settings.model_idle_check_seconds, settings.model_idle_unload_seconds))
-
-        async def watch() -> None:
-            try:
-                while True:
-                    await asyncio.sleep(interval)
-                    async with self._load_lock:
-                        self.unload_if_idle()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                log.exception("Privacy model idle unload watcher stopped unexpectedly")
-
-        self._unload_task = asyncio.create_task(watch(), name="privacy-model-idle-unload")
-
-    async def stop_idle_unload_watcher(self) -> None:
-        task = self._unload_task
-        self._unload_task = None
-        if task is not None:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        self.unload(reason="application shutdown")
-
-    async def ensure_loaded(self) -> None:
-        self.unload_if_idle()
-        if self.model is not None:
-            return
-        async with self._load_lock:
-            if self.model is not None:
-                return
-            device = self._resolve_device()
-            log.info("Loading privacy model: %s on device=%s", settings.privacy_model_id, device)
-            from gliner2 import GLiNER2
-
-            self.model = GLiNER2.from_pretrained(settings.privacy_model_id)
-            self._move_model_to_device(device)
-            self._touch()
-            log.info("Privacy model loaded on device=%s cuda_available=%s", self.model_device, self.cuda_available)
-
-    def count_tokens(self, text: str) -> int:
-        return max(1, len(text.split())) if text else 0
-
-    async def sanitize_text(self, text: str, ctx: RedactionContext, stats: RedactionStats) -> str:
-        if not text or len(text) > settings.max_string_chars:
-            return text
-        await self.ensure_loaded()
-        self._touch()
-        try:
-            result = self.model.extract_entities(
-                text,
-                settings.entity_types,
-                threshold=settings.min_entity_score,
-                include_confidence=True,
-                include_spans=True,
-            )
-        except TypeError:
-            result = self.model.extract_entities(text, settings.entity_types)
-        except Exception as exc:
-            log.exception("Privacy model inference failed")
-            raise HTTPException(status_code=500, detail=f"privacy_filter_failed: {exc}") from exc
-        spans = self._spans_from_result(text, result)
-        if not spans:
-            return text
-        spans.sort(key=lambda item: (item[0], -(item[1] - item[0])))
-        merged: list[tuple[int, int, str]] = []
-        for start, end, label in spans:
-            if not merged or start >= merged[-1][1]:
-                merged.append((start, end, label))
-            elif end > merged[-1][1]:
-                prev_start, _prev_end, prev_label = merged[-1]
-                merged[-1] = (prev_start, end, prev_label)
-        out: list[str] = []
-        last = 0
-        for start, end, label in merged:
-            original = text[start:end]
-            out.append(text[last:start])
-            out.append(ctx.placeholder(label, original))
-            last = end
-            stats.add(label, self.count_tokens(original))
-        out.append(text[last:])
-        return "".join(out)
-
-    def _spans_from_result(self, text: str, result: Any) -> list[tuple[int, int, str]]:
-        spans: list[tuple[int, int, str]] = []
-        if isinstance(result, list):
-            iterable = result
-        elif isinstance(result, dict):
-            entities = result.get("entities", result)
-            iterable = []
-            if isinstance(entities, dict):
-                for label, values in entities.items():
-                    if isinstance(values, list):
-                        iterable.extend({"label": label, "text": value} if isinstance(value, str) else {"label": label, **value} for value in values)
-            elif isinstance(entities, list):
-                iterable = entities
-        else:
-            iterable = []
-        for entity in iterable:
-            if not isinstance(entity, dict):
-                continue
-            score = float(entity.get("score", entity.get("confidence", 1.0)) or 0.0)
-            if score < settings.min_entity_score:
-                continue
-            start = entity.get("start")
-            end = entity.get("end")
-            value = entity.get("text") or entity.get("value") or entity.get("word")
-            label = entity.get("label") or entity.get("entity_group") or entity.get("entity") or "private"
-            if not isinstance(start, int) or not isinstance(end, int):
-                if not value:
-                    continue
-                index = text.find(str(value))
-                if index < 0:
-                    continue
-                start, end = index, index + len(str(value))
-            if start < 0 or end <= start or end > len(text):
-                continue
-            spans.append((start, end, normalize_label(str(label))))
-        return spans
-
-    async def sanitize_payload(self, payload: Any) -> tuple[Any, RedactionStats]:
-        ctx = RedactionContext()
-        stats = RedactionStats()
-        sanitized = await self._sanitize_any(payload, ctx, stats, parent_key=None)
-        return sanitized, stats
-
-    async def _sanitize_any(self, value: Any, ctx: RedactionContext, stats: RedactionStats, parent_key: str | None) -> Any:
-        if parent_key in settings.skip_json_keys:
-            return value
-        if isinstance(value, str):
-            return await self.sanitize_text(value, ctx, stats)
-        if isinstance(value, list):
-            return [await self._sanitize_any(item, ctx, stats, parent_key=None) for item in value]
-        if isinstance(value, dict):
-            return {key: await self._sanitize_any(item, ctx, stats, parent_key=str(key)) for key, item in value.items()}
-        return value
-
-
-sanitizer = PrivacySanitizer()
-app = FastAPI(title="OpenAI Privacy Filter Proxy GLiNER2", version="1.0.1")
-
-
-@app.on_event("startup")
-async def log_revision() -> None:
-    log.info("Starting OpenAI Privacy Filter Proxy GLiNER2 revision=%s", APP_REVISION)
-    await sanitizer.start_idle_unload_watcher()
-
-
-@app.on_event("shutdown")
-async def shutdown_sanitizer() -> None:
-    await sanitizer.stop_idle_unload_watcher()
 
 
 def extract_bearer(req: Request) -> str:
@@ -454,58 +157,27 @@ def require_auth(req: Request, *, metrics_auth: bool = False) -> None:
         return
     if not settings.inbound_api_keys:
         return
-    if extract_bearer(req) not in settings.inbound_api_keys:
+    token = extract_bearer(req)
+    if token not in settings.inbound_api_keys:
         raise HTTPException(status_code=401, detail="invalid_or_missing_api_token")
 
 
-@app.get("/health")
-async def health() -> dict[str, Any]:
-    return {
-        "status": "ok",
-        "model": settings.privacy_model_id,
-        "upstream": settings.upstream_base_url,
-        "llm_enabled": settings.llm_enabled,
-        "filter_output": settings.filter_output,
-        "model_suffix": settings.model_suffix,
-        "device": settings.device,
-        "resolved_device": sanitizer.model_device,
-        "cuda_available": sanitizer.cuda_available,
-        "model_loaded": sanitizer.model is not None,
-        "model_idle_unload_seconds": settings.model_idle_unload_seconds,
-        "model_idle_check_seconds": settings.model_idle_check_seconds,
-        "revision": APP_REVISION,
-    }
-
-
-@app.get("/metrics")
-async def get_metrics(req: Request) -> PlainTextResponse:
-    require_auth(req, metrics_auth=True)
-    return PlainTextResponse(await metrics.prometheus(), media_type="text/plain")
-
-
-def build_upstream_headers(req: Request) -> dict[str, str]:
+def build_upstream_headers(req: Request) -> Dict[str, str]:
     excluded = {
-        "host",
-        "content-length",
-        "connection",
-        "keep-alive",
-        "proxy-authenticate",
-        "proxy-authorization",
-        "te",
-        "trailers",
-        "transfer-encoding",
-        "upgrade",
+        "host", "content-length", "connection", "keep-alive",
+        "proxy-authenticate", "proxy-authorization",
+        "te", "trailers", "transfer-encoding", "upgrade",
     }
-    headers = {key: value for key, value in req.headers.items() if key.lower() not in excluded}
+    headers = {k: v for k, v in req.headers.items() if k.lower() not in excluded}
     if settings.upstream_api_key:
         headers["authorization"] = f"Bearer {settings.upstream_api_key}"
     headers["content-type"] = "application/json"
     return headers
 
 
-def headers_for_modified_body(resp: Response) -> dict[str, str]:
+def headers_for_modified_body(resp: Response) -> Dict[str, str]:
     excluded = {"content-length", "content-encoding", "transfer-encoding", "connection"}
-    return {key: value for key, value in resp.headers.items() if key.lower() not in excluded}
+    return {k: v for k, v in resp.headers.items() if k.lower() not in excluded}
 
 
 def response_models_endpoint(full_path: str) -> bool:
@@ -520,16 +192,25 @@ def add_response_model_suffixes(upstream_resp: Response, full_path: str) -> Resp
         response_payload = json.loads(upstream_resp.body)
     except Exception:
         return upstream_resp
-    response_payload = rewrite_response_model_ids(response_payload, models_endpoint=response_models_endpoint(full_path))
-    return JSONResponse(content=response_payload, status_code=upstream_resp.status_code, headers=headers_for_modified_body(upstream_resp))
+    response_payload = rewrite_response_model_ids(
+        response_payload, models_endpoint=response_models_endpoint(full_path)
+    )
+    return JSONResponse(
+        content=response_payload,
+        status_code=upstream_resp.status_code,
+        headers=headers_for_modified_body(upstream_resp),
+    )
 
 
-async def forward_request(req: Request, full_path: str, sanitized_payload: Any, stream: bool = False) -> Response:
+async def forward_request(
+    req: Request, full_path: str, sanitized_payload: Any, stream: bool = False,
+) -> Response:
     if not settings.llm_enabled:
         raise HTTPException(status_code=503, detail="llm_disabled")
     full_path = unsuffix_model_path(full_path)
     url = f"{settings.upstream_base_url}/{full_path}"
     timeout = httpx.Timeout(600.0, connect=30.0)
+
     if stream:
         client = httpx.AsyncClient(timeout=timeout)
         upstream_req = client.build_request(
@@ -545,14 +226,19 @@ async def forward_request(req: Request, full_path: str, sanitized_payload: Any, 
             await upstream_stream.aclose()
             await client.aclose()
 
-        headers = {key: value for key, value in upstream_stream.headers.items() if key.lower() not in {"content-length", "connection"}}
+        content_type = upstream_stream.headers.get("content-type", "application/json")
+        headers = {
+            k: v for k, v in upstream_stream.headers.items()
+            if k.lower() not in {"content-length", "connection"}
+        }
         return StreamingResponse(
             upstream_stream.aiter_bytes(),
             status_code=upstream_stream.status_code,
             headers=headers,
-            media_type=upstream_stream.headers.get("content-type", "application/json"),
+            media_type=content_type,
             background=BackgroundTask(close_upstream),
         )
+
     async with httpx.AsyncClient(timeout=timeout) as client:
         upstream = await client.request(
             method=req.method,
@@ -561,8 +247,18 @@ async def forward_request(req: Request, full_path: str, sanitized_payload: Any, 
             params=dict(req.query_params),
             json=sanitized_payload,
         )
-    headers = {key: value for key, value in upstream.headers.items() if key.lower() not in {"content-length", "content-encoding", "transfer-encoding", "connection"}}
-    return Response(content=upstream.content, status_code=upstream.status_code, headers=headers, media_type=upstream.headers.get("content-type", "application/json"))
+
+    content_type = upstream.headers.get("content-type", "application/json")
+    headers = {
+        k: v for k, v in upstream.headers.items()
+        if k.lower() not in {"content-length", "content-encoding", "transfer-encoding", "connection"}
+    }
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        headers=headers,
+        media_type=content_type,
+    )
 
 
 def text_from_message_content(content: Any) -> str:
@@ -638,22 +334,51 @@ def llm_disabled_response_payload(full_path: str, sanitized_payload: Any, in_sta
     }
 
 
+@app.get("/health")
+async def health() -> Dict[str, Any]:
+    return {
+        "status": "ok",
+        "model": settings.privacy_model_id,
+        "upstream": settings.upstream_base_url,
+        "llm_enabled": settings.llm_enabled,
+        "filter_output": settings.filter_output,
+        "model_suffix": settings.model_suffix,
+        "device": settings.device,
+        "model_idle_unload_seconds": settings.model_idle_unload_seconds,
+        "revision": APP_REVISION,
+    }
+
+
+@app.get("/metrics")
+async def get_metrics(req: Request) -> PlainTextResponse:
+    require_auth(req, metrics_auth=True)
+    return PlainTextResponse(await metrics.prometheus(), media_type="text/plain")
+
+
 @app.api_route("/v1/{full_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
 async def proxy_openai(req: Request, full_path: str) -> Response:
     if req.method == "OPTIONS":
         return Response(status_code=204)
+
     require_auth(req)
-    if req.method in {"GET", "DELETE"}:
+
+    if req.method in ("GET", "DELETE"):
+        if not settings.llm_enabled:
+            raise HTTPException(status_code=503, detail="llm_disabled")
         upstream_resp = await forward_request(req, full_path, sanitized_payload=None)
         return add_response_model_suffixes(upstream_resp, full_path)
+
     try:
         payload = await req.json()
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail="expected_json_body") from exc
+    except Exception:
+        raise HTTPException(status_code=400, detail="expected_json_body")
+
     start = time.perf_counter()
-    sanitized_payload, in_stats = await sanitizer.sanitize_payload(payload)
+
+    sanitized_payload, in_stats = await sanitizer.sanitize_payload(payload, settings)
     sanitized_payload = rewrite_request_model_ids(sanitized_payload)
     await metrics.add(in_stats.tokens, in_stats.spans, in_stats.labels)
+
     if not settings.llm_enabled:
         response_payload = llm_disabled_response_payload(full_path, sanitized_payload, in_stats)
         response = JSONResponse(content=response_payload)
@@ -661,26 +386,37 @@ async def proxy_openai(req: Request, full_path: str) -> Response:
         response.headers["x-privacy-filtered-spans"] = str(in_stats.spans)
         response.headers["x-privacy-filter-latency-ms"] = str(round((time.perf_counter() - start) * 1000, 2))
         return response
+
     wants_stream = bool(isinstance(payload, dict) and payload.get("stream") is True)
     if wants_stream:
         return await forward_request(req, full_path, sanitized_payload, stream=True)
+
     upstream_resp = await forward_request(req, full_path, sanitized_payload, stream=False)
+
     upstream_resp.headers["x-privacy-filtered-tokens"] = str(in_stats.tokens)
     upstream_resp.headers["x-privacy-filtered-spans"] = str(in_stats.spans)
     upstream_resp.headers["x-privacy-filter-latency-ms"] = str(round((time.perf_counter() - start) * 1000, 2))
+
     rewritten_resp = add_response_model_suffixes(upstream_resp, full_path)
     content_type = rewritten_resp.headers.get("content-type", "")
     if "application/json" not in content_type:
         return rewritten_resp
+
     try:
         response_payload = json.loads(rewritten_resp.body)
     except Exception:
         return rewritten_resp
+
     out_stats = RedactionStats()
     if settings.filter_output:
-        response_payload, out_stats = await sanitizer.sanitize_payload(response_payload)
+        response_payload, out_stats = await sanitizer.sanitize_payload(response_payload, settings)
         await metrics.add(out_stats.tokens, out_stats.spans, out_stats.labels, count_request=False)
-    final = JSONResponse(content=response_payload, status_code=rewritten_resp.status_code, headers=headers_for_modified_body(rewritten_resp))
+
+    final = JSONResponse(
+        content=response_payload,
+        status_code=rewritten_resp.status_code,
+        headers=headers_for_modified_body(rewritten_resp),
+    )
     if settings.filter_output:
         final.headers["x-privacy-filtered-output-tokens"] = str(out_stats.tokens)
         final.headers["x-privacy-filtered-output-spans"] = str(out_stats.spans)
@@ -689,5 +425,9 @@ async def proxy_openai(req: Request, full_path: str) -> Response:
 
 if __name__ == "__main__":
     import uvicorn
-
-    uvicorn.run("app:app", host=settings.host, port=settings.port, log_level=os.getenv("LOG_LEVEL", "info"))
+    uvicorn.run(
+        "app:app",
+        host=settings.host,
+        port=settings.port,
+        log_level=os.getenv("LOG_LEVEL", "info"),
+    )
