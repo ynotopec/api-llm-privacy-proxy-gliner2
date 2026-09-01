@@ -1,11 +1,73 @@
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+*.egg
+*.egg-dist
+
+# Virtual environments
 .venv/
+venv/
+ENV/
+env/
+
+# Environment files
 .env
-.uv-cache/
-uv.lock
-pytest_cache/
+.env.*
+!.env.example
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Testing
 .pytest_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Linting / type checking
 .mypy_cache/
 .ruff_cache/
+.pytype/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Cache directories
+.uv-cache/
+uv.lock
+
+# HuggingFace
+HF_HOME/
+TRANSFORMERS_CACHE/
+
+# Docker
+.docker/
 .DS_Store
