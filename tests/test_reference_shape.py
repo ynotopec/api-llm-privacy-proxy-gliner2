@@ -1,6 +1,8 @@
 from pathlib import Path
 
 SOURCE = Path("app.py").read_text()
+REQUIREMENTS = Path("requirements.txt").read_text().splitlines()
+PYPROJECT = Path("pyproject.toml").read_text()
 
 
 def test_openai_v1_route_matches_reference_shape():
@@ -24,6 +26,12 @@ def test_reference_features_are_present():
 def test_gliner2_extract_entities_receives_entity_types():
     assert 'extract_entities(\n                text,\n                settings.entity_types,' in SOURCE
     assert 'extract_entities(text, settings.entity_types)' in SOURCE
+
+
+def test_transformers_is_capped_before_incompatible_major_version():
+    constraint = "transformers>=4.48,<5"
+    assert constraint in REQUIREMENTS
+    assert f'"{constraint}"' in PYPROJECT
 
 
 def test_health_exposes_device_revision_marker():

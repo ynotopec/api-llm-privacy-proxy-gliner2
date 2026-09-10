@@ -129,3 +129,11 @@ sudo journalctl -u api-llm-privacy-proxy-gliner2 -f
 ## Dépannage
 
 Si les logs contiennent encore `GLiNER2.extract_entities() missing 1 required positional argument: 'entity_types'`, le service lancé n'utilise pas ce code. Vérifier `/health` : le champ `revision` doit valoir `gliner2-device-health`, puis relancer `./install.sh` et redémarrer le service systemd.
+
+Si le chargement de `fastino/gliner2.5-multi-v1` échoue avec
+`AttributeError: 'ExtractorConfig' object has no attribute 'max_width'`, la
+version 5 de Transformers a chargé sa propre configuration `extractor`, qui
+n'est pas compatible avec celle du checkpoint GLiNER2. Les dépendances du
+projet imposent `transformers>=4.48,<5`. Relancer `./install.sh` pour appliquer
+la contrainte (y compris sur un environnement virtuel existant), puis
+redémarrer le service.
