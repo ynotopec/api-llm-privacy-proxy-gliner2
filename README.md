@@ -130,10 +130,13 @@ sudo journalctl -u api-llm-privacy-proxy-gliner2 -f
 
 Si les logs contiennent encore `GLiNER2.extract_entities() missing 1 required positional argument: 'entity_types'`, le service lancé n'utilise pas ce code. Vérifier `/health` : le champ `revision` doit valoir `gliner2-device-health`, puis relancer `./install.sh` et redémarrer le service systemd.
 
-Si le chargement de `fastino/gliner2.5-multi-v1` échoue avec
-`AttributeError: 'ExtractorConfig' object has no attribute 'max_width'`, la
-version 5 de Transformers a chargé sa propre configuration `extractor`, qui
-n'est pas compatible avec celle du checkpoint GLiNER2. Les dépendances du
-projet imposent `transformers>=4.48,<5`. Relancer `./install.sh` pour appliquer
-la contrainte (y compris sur un environnement virtuel existant), puis
-redémarrer le service.
+`fastino/gliner2.5-multi-v1` **n'est pas compatible avec le chargeur actuel** :
+ce checkpoint utilise une configuration d'architecture `extractor`, tandis que
+le chemin `GLiNER2.from_pretrained()` utilisé par ce proxy attend notamment le
+paramètre de span `max_width`. L'erreur
+`AttributeError: 'ExtractorConfig' object has no attribute 'max_width'` indique
+ce conflit d'architecture, pas une simple incompatibilité de version de
+Transformers. Le proxy le signale avec une réponse 503
+`privacy_model_incompatible` plutôt qu'une erreur ASGI non qualifiée. Conserver
+`fastino/gliner2-privacy-filter-PII-multi` tant qu'un chargeur prenant
+explicitement en charge l'architecture GLiNER2.5 n'a pas été intégré et testé.

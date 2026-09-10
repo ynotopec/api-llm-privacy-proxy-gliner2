@@ -9,9 +9,6 @@ dependencies = [
   "httpx==0.28.1",
   "pydantic==2.10.4",
   "gliner2>=0.1.0",
-  # Transformers 5 claims GLiNER2's `extractor` model type and produces an
-  # ExtractorConfig without the span settings (for example, max_width).
-  "transformers>=4.48,<5",
 ]
 
 [dependency-groups]

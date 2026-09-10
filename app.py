@@ -324,7 +324,19 @@ class PrivacySanitizer:
             log.info("Loading privacy model: %s on device=%s", settings.privacy_model_id, device)
             from gliner2 import GLiNER2
 
-            self.model = GLiNER2.from_pretrained(settings.privacy_model_id)
+            try:
+                self.model = GLiNER2.from_pretrained(settings.privacy_model_id)
+            except AttributeError as exc:
+                if "ExtractorConfig" in str(exc) and "max_width" in str(exc):
+                    raise HTTPException(
+                        status_code=503,
+                        detail=(
+                            "privacy_model_incompatible: the configured checkpoint uses an "
+                            "extractor architecture that this GLiNER2 loader cannot load; "
+                            "use fastino/gliner2-privacy-filter-PII-multi"
+                        ),
+                    ) from exc
+                raise
             self._move_model_to_device(device)
             self._touch()
             log.info("Privacy model loaded on device=%s cuda_available=%s", self.model_device, self.cuda_available)

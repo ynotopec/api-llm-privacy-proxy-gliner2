@@ -3,6 +3,3 @@ uvicorn[standard]==0.34.0
 httpx==0.28.1
 pydantic==2.10.4
 gliner2>=0.1.0
-# GLiNER2 checkpoints use their own `extractor` config. Transformers 5 also
-# registers that model type and loads an incompatible ExtractorConfig.
-transformers>=4.48,<5
