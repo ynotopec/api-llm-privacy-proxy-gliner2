@@ -128,4 +128,6 @@ sudo journalctl -u api-llm-privacy-proxy-gliner2 -f
 
 ## Dépannage
 
-Si les logs contiennent encore `GLiNER2.extract_entities() missing 1 required positional argument: 'entity_types'`, le service lancé n'utilise pas ce code. Vérifier `/health` : le champ `revision` doit valoir `gliner2-device-health`, puis relancer `./install.sh` et redémarrer le service systemd.
+Si le chargement du tokenizer échoue avec `AttributeError: 'list' object has no attribute 'keys'` ou indique que `protobuf` est absent, relancer `./install.sh` puis redémarrer le service. L'installation borne Transformers à la branche 4.x, compatible avec les métadonnées actuelles du tokenizer GLiNER2, et installe explicitement Protobuf pour le fallback DeBERTa-v2.
+
+Si les logs contiennent encore `GLiNER2.extract_entities() missing 1 required positional argument: 'entity_types'`, le service lancé n'utilise pas ce code. Vérifier `/health` : le champ `revision` doit valoir `gliner2-optional-llm`, puis relancer `./install.sh` et redémarrer le service systemd.

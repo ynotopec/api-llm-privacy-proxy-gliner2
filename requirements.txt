@@ -3,3 +3,8 @@ uvicorn[standard]==0.34.0
 httpx==0.28.1
 pydantic==2.10.4
 gliner2>=0.1.0
+# GLiNER2's published tokenizer metadata still uses the Transformers 4.x
+# extra_special_tokens list format. Transformers 5 expects a mapping instead.
+transformers<5
+# Required when Transformers falls back to the slow DeBERTa-v2 tokenizer.
+protobuf>=4.25
